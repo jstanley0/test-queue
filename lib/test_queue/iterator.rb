@@ -15,33 +15,35 @@ module TestQueue
       end
     end
 
+    def query(payload)
+      client = connect_to_master(payload)
+      return if client.nil?
+      _r, _w, e = IO.select([client], nil, [client], nil)
+      return if !e.empty?
+
+      if data = client.read(65536)
+        client.close
+        item = Marshal.load(data)
+        return if item.nil? || item.empty?
+        item
+      end
+    end
+
     def each
       fail "already used this iterator. previous caller: #@done" if @done
 
-      while true
-        client = connect_to_master('POP')
-        break if client.nil?
-        _r, _w, e = IO.select([client], nil, [client], nil)
-        break if !e.empty?
+      while item = query('POP')
+        suite = @suites[item]
 
-        if data = client.read(65536)
-          client.close
-          item = Marshal.load(data)
-          break if item.nil? || item.empty?
-          suite = @suites[item]
-
-          $0 = "#{@procline} - #{suite.respond_to?(:description) ? suite.description : suite}"
-          start = Time.now
-          if @filter
-            @filter.call(suite){ yield suite }
-          else
-            yield suite
-          end
-          key = suite.respond_to?(:id) ? suite.id : suite.to_s
-          @stats[key] = Time.now - start
+        $0 = "#{@procline} - #{suite.respond_to?(:description) ? suite.description : suite}"
+        start = Time.now
+        if @filter
+          @filter.call(suite){ yield suite }
         else
-          break
+          yield suite
         end
+        key = suite.respond_to?(:id) ? suite.id : suite.to_s
+        @stats[key] = Time.now - start
       end
     rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED
     ensure
