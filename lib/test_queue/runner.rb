@@ -35,11 +35,7 @@ module TestQueue
       end
 
       @procline = $0
-      @suites = queue.inject(Hash.new) do |hash, suite|
-        key = suite.respond_to?(:id) ? suite.id : suite.to_s
-        hash.update key => suite
-      end
-      @queue = @suites.keys
+      prepare_queue(queue)
 
       @workers = {}
       @completed = []
@@ -80,6 +76,11 @@ module TestQueue
       end
 
       @exit_when_done = true
+    end
+
+    def prepare_queue(queue)
+      @queue = queue
+      @suites = @queue.inject(Hash.new){ |hash, suite| hash.update suite.to_s => suite }
     end
 
     def stats
@@ -142,17 +143,20 @@ module TestQueue
 
       puts
 
-      if @stats
-        File.open(stats_file, 'wb') do |f|
-          f.write Marshal.dump(stats)
-        end
-      end
-
+      save_stats
       summarize
 
       estatus = @completed.inject(0){ |s, worker| s + worker.status.exitstatus }
       estatus = 255 if estatus > 255
       estatus
+    end
+
+    def save_stats
+      if @stats
+        File.open(stats_file, 'wb') do |f|
+          f.write Marshal.dump(stats)
+        end
+      end
     end
 
     def summarize
@@ -324,16 +328,32 @@ module TestQueue
       puts worker.output if ENV['TEST_QUEUE_VERBOSE'] || worker.status.exitstatus != 0
     end
 
+    def queue_empty?
+      @queue.empty?
+    end
+
     def distribute_queue
       return if relay?
       @remote_workers = 0
 
-      until @queue.empty? && @remote_workers == 0
+      puts "Distributing queue" if ENV['TEST_QUEUE_VERBOSE']
+      last_command = Time.now
+      until queue_empty? && @remote_workers == 0
         queue_status(@start_time, @queue.size, @workers.size, @remote_workers)
 
         if IO.select([@server], nil, nil, 0.1).nil?
+          if Time.now - last_command > 120
+            puts "something bad happened!"
+            require "pp"
+            puts "num workers #{@remote_workers}"
+            puts "queue empty? #{queue_empty?}"
+            puts "example_queue_size: #{example_queue_size}"
+            pp group_data.reject { |k, v| v.empty? }
+            raise
+          end
           reap_worker(false) if @workers.any? # check for worker deaths
         else
+          last_command = Time.now
           sock = @server.accept
           cmd = sock.gets.strip
           handle_command(cmd, sock)
@@ -341,6 +361,12 @@ module TestQueue
         end
       end
     ensure
+      if $!
+        require "pp"
+        puts $!
+        pp $!.backtrace if $!
+      end
+
       stop_master
 
       until @workers.empty?

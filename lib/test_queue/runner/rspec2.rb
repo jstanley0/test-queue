@@ -18,6 +18,7 @@ module RSpec::Core
         begin
           @configuration.run_hook(:before, :suite)
           iterator.map {|g|
+            break [false] if RSpec.world.wants_to_quit
             print "    #{g.description}: "
             start = Time.now
             ret = g.run(reporter)
