@@ -27,12 +27,13 @@ module TestQueue
         return if item.nil? || item.empty?
         item
       end
+    rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED
     end
 
     def each
       fail "already used this iterator. previous caller: #@done" if @done
 
-      while item = query('POP')
+      while item = query("POP\n")
         suite = @suites[item]
 
         $0 = "#{@procline} - #{suite.respond_to?(:description) ? suite.description : suite}"
@@ -42,10 +43,8 @@ module TestQueue
         else
           yield suite
         end
-        key = suite.respond_to?(:id) ? suite.id : suite.to_s
-        @stats[key] = Time.now - start
+        @stats[suite.to_s] = Time.now - start
       end
-    rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED
     ensure
       @done = caller.first
       File.open("/tmp/test_queue_worker_#{$$}_stats", "wb") do |f|
@@ -60,7 +59,7 @@ module TestQueue
         else
           UNIXSocket.new(@sock)
         end
-      sock.puts(cmd)
+      sock.write(cmd)
       sock
     rescue Errno::EPIPE
       nil

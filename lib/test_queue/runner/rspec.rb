@@ -1,34 +1,14 @@
 require 'test_queue/runner'
 require 'rspec/core'
 
-case ::RSpec::Core::Version::STRING.to_i
-when 2
-  require_relative 'rspec2'
-when 3
-  require_relative 'rspec3'
-else
-  fail 'requires rspec version 2 or 3'
-end
 
 module TestQueue
   class Runner
     class RSpec < Runner
       def initialize
         @rspec = ::RSpec::Core::QueueRunner.new
-        @split_groups = ENV['TEST_QUEUE_SPLIT_GROUPS'] && ENV['TEST_QUEUE_SPLIT_GROUPS'].strip.downcase == 'true'
-        if @split_groups
-          groups = @rspec.example_groups
-          groups_to_split, groups_to_keep = [], []
-          groups.each do |group|
-            (group.metadata[:no_split] ? groups_to_keep : groups_to_split) << group
-          end
-          queue = groups_to_split.map(&:descendant_filtered_examples).flatten
-          queue.concat groups_to_keep
-          queue.sort_by!{ |s| -(stats[s.id] || 0) }
-        else
-          queue = @rspec.example_groups.sort_by{ |s| -(stats[s.to_s] || 0) }
-        end
-
+        queue = @rspec.example_groups
+        queue = queue.sort_by{ |s| -(stats[s.to_s] || 0) }
         super(queue)
       end
 
@@ -37,9 +17,24 @@ module TestQueue
         @rspec.run_each(iterator).to_i
       end
 
+      # since groups can span runners, we save off the old stats,
+      # figure out our new stats across all runners, and merge
+      # into the old stats
+      def summarize_internal
+        @previous_stats = stats
+        @stats = {}
+        super
+      end
+
+      def save_stats
+        @stats = @previous_stats.merge(stats)
+        super
+      end
+
       def summarize_worker(worker)
         worker.stats.each do |s, val|
-          stats[s] = val
+          stats[s] ||= 0
+          stats[s] += val
         end
 
         worker.summary  = worker.lines.grep(/ examples?, /).first
@@ -47,4 +42,14 @@ module TestQueue
       end
     end
   end
+end
+
+case ::RSpec::Core::Version::STRING.to_i
+when 2
+  require_relative 'rspec2'
+when 3
+  require_relative 'rspec3'
+  require_relative 'rspec/split_groups' if ["1", "true"].include?(ENV.fetch("TEST_QUEUE_SPLIT_GROUPS", "0").downcase)
+else
+  fail 'requires rspec version 2 or 3'
 end
