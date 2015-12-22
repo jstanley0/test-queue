@@ -32,14 +32,23 @@ module RSpec::Core
   end
 
   class ExampleGroup
-    # rspec only uses this to determine if before/after :all hooks should
-    # run.
+    # rspec uses this to determine if before/after :all hooks should run.
+    # if there are still examples in the queue, return any that we might
+    # run... we have no way of knowing yet which ones we'll actually run,
+    # since other workers can pull stuff off the queue
     #
     # NOTE: there's a race condition where the last example could be
     # claimed by someone else after we call this, meaning we might do a
     # little bit of unnecessary work, but ¯\_(ツ)_/¯
     def self.descendant_filtered_examples
-      @descendant_filtered_examples ||= TestQueue.iterator.has_descendant_examples_in_queue?(self.to_s) ? [1] : []
+      @descendant_filtered_examples ||= begin
+        if TestQueue.iterator.has_descendant_examples_in_queue?(self.to_s)
+          filtered_examples = RSpec.world.filtered_examples[self]
+          filtered_examples + FlatMap.flat_map(children, &:descendant_filtered_examples)
+        else
+          []
+        end
+      end
     end
 
     # make sure rspec gets the examples from the iterator...
