@@ -29,6 +29,7 @@ module RSpec::Core
       @configuration.reporter.report(@world.ordered_example_groups.count) do |reporter|
         @configuration.with_suite_hooks do
           iterator.map { |g|
+            break [false] if RSpec.world.wants_to_quit
             print "    #{g.description}: "
             start = Time.now
             ret = g.run(reporter)
