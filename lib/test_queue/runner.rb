@@ -25,7 +25,7 @@ module TestQueue
     attr_accessor :concurrency, :exit_when_done
 
     def initialize(queue, concurrency=nil, socket=nil, relay=nil)
-      raise ArgumentError, 'array required' unless Array === queue
+      raise ArgumentError, 'array(-ish) required' unless Array === queue || queue.respond_to?(:shift)
 
       if forced = ENV['TEST_QUEUE_FORCE']
         forced = forced.split(/\s*,\s*/)

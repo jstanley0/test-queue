@@ -51,6 +51,10 @@ class TestQueue::Runner::RSpec
         super && example_queue_size == 0
       end
 
+      def normalize_scope(scope)
+        scope
+      end
+
       # Pop the next item (example or group) directly under the given
       # scope. If we pop a group, also recursively pop sub-items till we
       # get an example. This way we can avoid race conditions and ensure
@@ -66,6 +70,7 @@ class TestQueue::Runner::RSpec
         end
 
         queue = if scope
+          scope = normalize_scope(scope)
           group_queues[scope].send(type == :group ? :groups : :examples)
         else
           @queue
@@ -82,10 +87,11 @@ class TestQueue::Runner::RSpec
           if subitems = pop_next(item)
             # if the group is eligible for splitting, throw it to the back of the queue so
             # another worker can potentially come help
-            sub_queue = group_queues[item]
+            key = normalize_scope(item)
+            sub_queue = group_queues[key]
             can_split = !sub_queue.no_split
             has_more = !sub_queue.empty?
-            below_split_threshold = split_counts[item] < max_splits_per_group
+            below_split_threshold = split_counts[key] < max_splits_per_group
 
             if can_split && has_more && below_split_threshold
               split_counts[item] += 1
