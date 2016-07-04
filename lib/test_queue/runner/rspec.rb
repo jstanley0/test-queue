@@ -5,10 +5,10 @@ require 'rspec/core'
 module TestQueue
   class Runner
     class RSpec < Runner
-      def initialize
+      def initialize(options = {})
         @rspec = ::RSpec::Core::QueueRunner.new
         queue = @rspec.example_groups
-        queue = queue.sort_by{ |s| -(stats[s.to_s] || 0) }
+        queue = queue.sort_by{ |s| -(stats[s.to_s] || 0) } unless options[:no_sort]
         super(queue)
       end
 
@@ -49,7 +49,10 @@ when 2
   require_relative 'rspec2'
 when 3
   require_relative 'rspec3'
+
+  # you can use split groups, or lazy groups, or both, but they need to load in this order
   require_relative 'rspec/split_groups' if ["1", "true"].include?(ENV.fetch("TEST_QUEUE_SPLIT_GROUPS", "0").downcase)
+  require_relative 'rspec/lazy_groups' if ["1", "true"].include?(ENV.fetch("TEST_QUEUE_LAZY_GROUPS", "0").downcase)
 else
   fail 'requires rspec version 2 or 3'
 end
