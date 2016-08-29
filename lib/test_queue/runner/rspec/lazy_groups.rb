@@ -52,21 +52,42 @@ class TestQueue::Runner::RSpec
     # This replaces @queue
     module Queue
       class << self
+        extend Forwardable
+
+        def_delegator :split_queue, :<<
+
         attr_accessor :group_loaded
+
+        # While it is as lazy as possible, you can request that it load
+        # a certain number up front. This is useful in conjunction with
+        # preferred tags and a custom order_files method. That way you
+        # can ensure certain files are preloaded before anything starts.
+        attr_accessor :preload_count
+        def preload!
+          @preloaded = true
+          (preload_count || 0).times { queue_up_lazy_group }
+        end
+
+        def index
+          preload! unless @preloaded
+          queue.index &Proc.new
+        end
+
+        def delete_at(index)
+          queue_up_lazy_groups
+          queue.delete_at(index)
+        end
 
         def empty?
           queue.empty? && BackgroundLoaderProxy.empty? && split_queue.empty?
         end
 
         def shift
+          preload! unless @preloaded
           return if empty?
-          return queue.shift ||
-                 queue_up_lazy_group && queue.shift ||
-                 split_queue.shift
-        end
-
-        def <<(obj)
-          split_queue << obj
+          queue_up_lazy_groups
+          puts "All groups assigned" if ENV["TEST_QUEUE_VERBOSE"] && queue.size == 1 && BackgroundLoaderProxy.empty?
+          queue.shift || split_queue.shift
         end
 
         # Not necessarily accurate, since BackgroundLoaderProxy.count is
@@ -78,6 +99,14 @@ class TestQueue::Runner::RSpec
         end
 
        private
+
+        def queue_up_lazy_groups
+          # pull in any already background-loaded ones
+          queue_up_lazy_group while BackgroundLoaderProxy.queue_size > 0
+          # we might be faster than the background loader, so block
+          # until we get one (or it's done)
+          queue_up_lazy_group if queue.empty?
+        end
 
         def queue_up_lazy_group
           group_info = BackgroundLoaderProxy.shift or return
@@ -157,8 +186,8 @@ class TestQueue::Runner::RSpec
     # 1. The parent process tells the child process which files to load
     # 2. The child process loads each file and writes a bunch of metadata
     #    back to the parent
-    # 3. The parent lazily reads that metadata as it needs an item for the
-    #    queue
+    # 3. The parent pulls any outstanding data its queue right before it
+    #    shifts the next item
     #
     # So the lower bound on how quickly test-queue can finish is how long it
     # takes to load up your whole app and test-suite (step 3 can block on 2
@@ -173,7 +202,6 @@ class TestQueue::Runner::RSpec
           data = socket.gets or raise("unexpected EOF from background loader")
           if data == "EOF\n" # send an actual "EOF\n" string to signal we are done
             self.count = 0
-            puts "All groups assigned" if ENV["TEST_QUEUE_VERBOSE"]
             close
             return nil
           end
@@ -206,6 +234,11 @@ class TestQueue::Runner::RSpec
           end
           child.close
           self.socket = EagerReader.new(parent)
+        end
+
+        # how many items can we read before blocking?
+        def queue_size
+          socket && socket.queue_size || 0
         end
 
        private
@@ -282,6 +315,9 @@ class TestQueue::Runner::RSpec
     # like the built-in Queue, but much less passive about running the
     # writer thread
     class HungryQueue
+      extend Forwardable
+      def_delegators :@queue, :empty?, :size
+
       def initialize
         @queue = []
         @mutex = Mutex.new
@@ -294,10 +330,6 @@ class TestQueue::Runner::RSpec
       def shift
         Thread.pass while empty? && !closed?
         @mutex.synchronize { @queue.shift }
-      end
-
-      def empty?
-        @queue.empty?
       end
 
       def close
@@ -361,6 +393,10 @@ class TestQueue::Runner::RSpec
 
       def close
         @reader.join
+      end
+
+      def queue_size
+        @queue.size
       end
 
      private

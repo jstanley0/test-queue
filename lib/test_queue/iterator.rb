@@ -2,7 +2,7 @@ module TestQueue
   class Iterator
     attr_reader :stats, :sock
 
-    def initialize(sock, suites, filter=nil)
+    def initialize(sock, suites, filter=nil, runner: nil)
       @done = false
       @stats = {}
       @procline = $0
@@ -13,6 +13,7 @@ module TestQueue
         @tcp_address = $1
         @tcp_port = $2.to_i
       end
+      @runner = runner
     end
 
     def query(payload)

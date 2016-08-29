@@ -15,6 +15,27 @@ class TestQueue::Runner::RSpec
     end
 
     module Runner
+      # A given runner can set a preferred_tag, and it will ask for those
+      # matching ExampleGroups from the master before it works on any others
+      #
+      # Example:
+      #
+      #   class MyRunner < TestQueue::Runner::RSpec
+      #     def after_fork(num)
+      #       if num == 1
+      #         # make the first worker work exclusively on no_split
+      #         # groups, until they are done, at which point it will do
+      #         # whatever
+      #         self.preferred_tag = [:no_split, true]
+      #       end
+      #     end
+      #
+      # Note: only the `no_split` metadata is supported by default, but you
+      # can add other ones like so:
+      #
+      #   TestQueue::Runner::RSpec::GroupQueue::TRACKED_METADATA << :feature
+      attr_accessor :preferred_tag
+
       def prepare_queue(queue)
         @queue = queue.map(&:to_s)
         @suites = TestQueue::Runner::RSpec::GroupResolver.new(queue)
@@ -63,9 +84,9 @@ class TestQueue::Runner::RSpec
       # Returns nil if there are no more examples in this scope, otherwise
       # any array containing zero or more intermediate group keys and the
       # example key they resolve to.
-      def pop_next(scope, type = :any)
+      def pop_next(scope, type: :any, preferred_tag: nil)
         if type == :any
-          return pop_next(scope, :example) || pop_next(scope, :group)
+          return pop_next(scope, type: :example) || pop_next(scope, type: :group)
         end
 
         queue = if scope
@@ -75,7 +96,7 @@ class TestQueue::Runner::RSpec
           @queue
         end
 
-        while item = queue.shift
+        while item = best_item(queue, preferred_tag)
           # woot, direct child example
           if type == :example
             self.example_queue_size -= 1
@@ -88,7 +109,7 @@ class TestQueue::Runner::RSpec
             # another worker can potentially come help
             key = normalize_scope(item)
             sub_queue = group_queues[key]
-            can_split = !sub_queue.no_split
+            can_split = !sub_queue.tags[:no_split]
             has_more = !sub_queue.empty?
             below_split_threshold = split_counts[key] < max_splits_per_group
 
@@ -107,6 +128,17 @@ class TestQueue::Runner::RSpec
         nil
       end
 
+      def best_item(queue, preferred_tag)
+        return queue.shift unless preferred_tag
+
+        tag, val = preferred_tag
+        if index = queue.index { |item| group_queues[normalize_scope(item)].tags[tag] == val }
+          queue.delete_at(index)
+        else
+          queue.shift
+        end
+      end
+
       def split_counts
         @split_counts ||= Hash.new(0)
       end
@@ -122,12 +154,15 @@ class TestQueue::Runner::RSpec
         when /^POP/
           scope = nil
           type = :group
+          preferred_tag = nil
           if cmd =~ /^POP (GROUP|EXAMPLE) (\d+)/
             type = $1.downcase.to_sym
             data = sock.read($2.to_i)
             scope = Marshal.load(data)
+          elsif cmd =~ /^POP TAGGED (\d+)/
+            preferred_tag = Marshal.load(sock.read($1.to_i))
           end
-          if keys = pop_next(scope, type)
+          if keys = pop_next(scope, type: type, preferred_tag: preferred_tag)
             data = Marshal.dump(keys)
             sock.write(data)
           end
@@ -142,6 +177,14 @@ class TestQueue::Runner::RSpec
     end
 
     class Iterator < ::TestQueue::Iterator
+      def query(payload)
+        if payload == "POP\n" && @runner.preferred_tag
+          tag = ::Marshal.dump(@runner.preferred_tag)
+          payload = "POP TAGGED #{tag.bytesize}\n#{tag}"
+        end
+        super payload
+      end
+
       def pop(group, type)
         group = ::Marshal.dump(group)
         query("POP #{type.to_s.upcase} #{group.bytesize}\n#{group}")

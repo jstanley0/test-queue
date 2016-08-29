@@ -9,16 +9,18 @@ class TestQueue::Runner::RSpec
     end
   end
 
-  GroupQueue = Struct.new(:name, :examples, :groups, :no_split) do
+  GroupQueue = Struct.new(:name, :examples, :groups, :tags) do
     def empty?
       examples.empty? && groups.empty?
     end
+
+    TRACKED_METADATA = %i[no_split]
 
     def self.for(group)
       new group.to_s,
           group.filtered_items_hash[:example].keys,
           group.filtered_items_hash[:group].keys,
-          group.metadata[:no_split]
+          Hash[TRACKED_METADATA.map { |key| [key, group.metadata[key]] }]
     end
   end
 
