@@ -441,7 +441,15 @@ class TestQueue::Runner::RSpec
           BackgroundLoaderProxy.count
         end
 
+        # RSpec < 3.5
         def register(group)
+          super
+          LazyGroups.loader.loaded(group)
+          group
+        end
+
+        # RSpec >= 3.5
+        def record(group)
           super
           LazyGroups.loader.loaded(group)
           group
