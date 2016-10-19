@@ -28,7 +28,8 @@ module TestQueue
         return if item.nil? || item.empty?
         item
       end
-    rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED
+    rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ETIMEDOUT
+      puts "rescued #{$!} for #{payload.lines.first}"
     end
 
     def each
