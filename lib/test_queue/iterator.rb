@@ -39,19 +39,26 @@ module TestQueue
         suite = @suites[item]
 
         $0 = "#{@procline} - #{suite.respond_to?(:description) ? suite.description : suite}"
-        start = Time.now
-        if @filter
-          @filter.call(suite){ yield suite }
-        else
-          yield suite
+        capture_timing(suite) do
+          if @filter
+            @filter.call(suite){ yield suite }
+          else
+            yield suite
+          end
         end
-        @stats[suite.to_s] = Time.now - start
       end
     ensure
       @done = caller.first
       File.open("/tmp/test_queue_worker_#{$$}_stats", "wb") do |f|
         f.write Marshal.dump(@stats)
       end
+    end
+
+    def capture_timing(item)
+      start = Time.now
+      result = yield
+      @stats[item.to_s] = Time.now - start
+      result
     end
 
     def connect_to_master(cmd)

@@ -33,8 +33,10 @@ module TestQueue
 
       def summarize_worker(worker)
         worker.stats.each do |s, val|
-          stats[s] ||= 0
-          stats[s] += val
+          # take the cost of the slowest one across all runners;
+          # when splitting a group, the cost is the time of the slowest
+          # sub-group or example, not the group as a whole
+          stats[s] = [val, stats[s]].compact.max
         end
 
         worker.summary  = worker.lines.grep(/ examples?, /).first

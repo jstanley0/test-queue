@@ -37,11 +37,11 @@ class TestQueue::Runner::RSpec
       attr_accessor :preferred_tag
 
       def prepare_queue(queue)
-        @queue = queue.map(&:to_s)
+        @queue = queue.map { |item| [:group, item.to_s] }
         @suites = TestQueue::Runner::RSpec::GroupResolver.new(queue)
         queue.each do |group|
           group.descendants.each do |subgroup|
-            add_group_queue GroupQueue.for(subgroup)
+            add_group_queue GroupQueue.for(subgroup, stats)
           end
         end
       end
@@ -60,7 +60,7 @@ class TestQueue::Runner::RSpec
       end
 
       def add_group_queue(queue)
-        self.example_queue_size += queue.examples.size
+        self.example_queue_size += queue.num_examples
         super
       end
 
@@ -84,19 +84,16 @@ class TestQueue::Runner::RSpec
       # Returns nil if there are no more examples in this scope, otherwise
       # any array containing zero or more intermediate group keys and the
       # example key they resolve to.
-      def pop_next(scope, type: :any, preferred_tag: nil)
-        if type == :any
-          return pop_next(scope, type: :example) || pop_next(scope, type: :group)
-        end
-
+      def pop_next(scope, preferred_tag: nil)
         queue = if scope
           scope = normalize_scope(scope)
-          group_queues[scope].send(type == :group ? :groups : :examples)
+          group_queues[scope].queue
         else
           @queue
         end
 
-        while item = best_item(queue, preferred_tag)
+        while pair = best_item(queue, preferred_tag)
+          type, item = pair
           # woot, direct child example
           if type == :example
             self.example_queue_size -= 1
@@ -108,14 +105,14 @@ class TestQueue::Runner::RSpec
             # if the group is eligible for splitting, throw it to the back of the queue so
             # another worker can potentially come help
             key = normalize_scope(item)
-            sub_queue = group_queues[key]
+            sub_queue = group_queues[key] || raise("don't know what #{key.inspect} is (item is #{item.inspect}, pair is #{pair.inspect})")
             can_split = !sub_queue.tags[:no_split]
             has_more = !sub_queue.empty?
             below_split_threshold = split_counts[key] < max_splits_per_group
 
             if can_split && has_more && below_split_threshold
               split_counts[item] += 1
-              queue << item
+              queue << [type, item]
             end
 
             return [[type, item]] + subitems
@@ -132,7 +129,7 @@ class TestQueue::Runner::RSpec
         return queue.shift unless preferred_tag
 
         tag, val = preferred_tag
-        if index = queue.index { |item| group_queues[normalize_scope(item)].tags[tag] == val }
+        if index = queue.index { |type, item| group_queues[normalize_scope(item)].tags[tag] == val }
           queue.delete_at(index)
         else
           queue.shift
@@ -153,16 +150,14 @@ class TestQueue::Runner::RSpec
         case cmd
         when /^POP/
           scope = nil
-          type = :group
           preferred_tag = nil
-          if cmd =~ /^POP (GROUP|EXAMPLE) (\d+)/
-            type = $1.downcase.to_sym
-            data = sock.read($2.to_i)
+          if cmd =~ /^POP ITEM (\d+)/
+            data = sock.read($1.to_i)
             scope = Marshal.load(data)
           elsif cmd =~ /^POP TAGGED (\d+)/
             preferred_tag = Marshal.load(sock.read($1.to_i))
           end
-          if keys = pop_next(scope, type: type, preferred_tag: preferred_tag)
+          if keys = pop_next(scope, preferred_tag: preferred_tag)
             data = Marshal.dump(keys)
             sock.write(data)
           end
@@ -185,9 +180,28 @@ class TestQueue::Runner::RSpec
         super payload
       end
 
-      def pop(group, type)
+      def pop(group)
         group = ::Marshal.dump(group)
-        query("POP #{type.to_s.upcase} #{group.bytesize}\n#{group}")
+        query("POP ITEM #{group.bytesize}\n#{group}")
+      end
+
+      def capture_timing(item)
+        # for examples or no_split groups, we capture the total time, since
+        # it will take at least that long
+        return super(item.full_description) if item.is_a?(::RSpec::Core::Example)
+        return super if item.metadata[:no_split]
+
+        # otherwise we just capture the time of our context hooks plus the
+        # time of the slowest child in the group (a subgroup or example)
+        result = yield
+        slowest_child_time = item.filtered_items_hash.
+          values.
+          map(&:keys).
+          flatten.
+          map { |key| @stats[key] || 0 }.
+          max || 0
+        @stats[item.to_s] = item.hook_time + slowest_child_time
+        result
       end
     end
 
@@ -198,8 +212,6 @@ class TestQueue::Runner::RSpec
       end
 
       def order(items)
-        return [] if items.empty?
-        @enumerator.type = ::RSpec::Core::Example === items.first ? :example : :group
         @enumerator
       end
 
@@ -208,31 +220,36 @@ class TestQueue::Runner::RSpec
           attr_accessor :iterator
         end
 
-        attr_accessor :type
         attr_reader :group
+        attr_reader :example_block
 
         def initialize(group)
           @group = group
         end
 
-        # WARNING: this is completely dependent on ExampleGroup.run first
-        # mapping examples and then children. Which it does in all 3.x.
-        # But if that ever changes, or some other code uses the group's
-        # ordering_strategy, you're gonna have a bad time.
-        def map
-          result = []
-          if item = group.reserved_item
-            if type == :example && !(::RSpec::Core::Example === item)
-              # all examples have been run by another worker, since master
-              # told us to start with a given group, so bail
-              return result
-            end
+        def iterator
+          self.class.iterator
+        end
 
-            group.reserved_item = nil
-            result << yield(item)
+        # called first for examples, do nothing and save block.
+        # called again for groups ... start pulling off interleaved
+        # examples and groups, calling the appropriate block.
+        def map
+          block = Proc.new
+          if !@example_block
+            @example_block = block
+            return []
+          else
+            @group_block = block
           end
 
-          while keys = Enumerator.iterator.pop(group.to_s, type)
+          result = []
+          if item = group.reserved_item
+            group.reserved_item = nil
+            result << run_item(item)
+          end
+
+          while keys = iterator.pop(group.to_s)
             # direct child group or example
             pair = keys.shift
             subtype, key = pair
@@ -241,10 +258,16 @@ class TestQueue::Runner::RSpec
             # if a group, we need to reserve the specified descendant example
             # and any intermediate groups
             item.reserve_items(keys) if subtype == :group
-
-            result << yield(item)
+            result << run_item(item)
           end
           result
+        end
+
+        def run_item(item)
+          block = item.is_a?(::RSpec::Core::Example) ? @example_block : @group_block
+          iterator.capture_timing(item) do
+            block.call(item)
+          end
         end
       end
     end
@@ -260,8 +283,29 @@ class TestQueue::Runner::RSpec
           end
         end
 
+        # RSpec uses this twice; first for examples, then for groups.
+        # We basically make run_example a no-op and then do everything
+        # in the second call to #map ... examples and groups are
+        # interleaved, with the slowest ones first
         def ordering_strategy
           @ordering_strategy ||= QueueStrategy.new(self)
+        end
+
+        def run_before_context_hooks(*)
+          capture_hook_time { super }
+        end
+
+        def run_after_context_hooks(*)
+          capture_hook_time { super }
+        end
+
+        attr_reader :hook_time
+        def capture_hook_time
+          start = Time.now
+          result = yield
+          @hook_time ||= 0
+          @hook_time += Time.now - start
+          result
         end
       end
     end

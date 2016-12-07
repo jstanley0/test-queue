@@ -9,17 +9,24 @@ class TestQueue::Runner::RSpec
     end
   end
 
-  GroupQueue = Struct.new(:name, :examples, :groups, :tags) do
+  GroupQueue = Struct.new(:name, :queue, :tags) do
+    def num_examples
+      queue.count { |type, name| type == :example }
+    end
+
     def empty?
-      examples.empty? && groups.empty?
+      queue.empty?
     end
 
     TRACKED_METADATA = %i[no_split]
 
-    def self.for(group)
+    def self.for(group, stats)
+      items = group.filtered_items_hash[:example].keys.map { |name| [:example, name] } +
+              group.filtered_items_hash[:group].keys.map { |name| [:group, name] }
+      items.sort_by! { |type, item| -(stats[item] || Float::INFINITY) } if defined? SplitGroups
+
       new group.to_s,
-          group.filtered_items_hash[:example].keys,
-          group.filtered_items_hash[:group].keys,
+          items,
           Hash[TRACKED_METADATA.map { |key| [key, group.metadata[key]] }]
     end
   end

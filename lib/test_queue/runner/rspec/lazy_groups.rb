@@ -16,6 +16,7 @@ class TestQueue::Runner::RSpec
     module Runner
       def initialize(*)
         Queue.group_loaded = method(:add_group_queue)
+        BackgroundLoaderProxy.stats = stats
         super no_sort: true
       end
 
@@ -110,12 +111,12 @@ class TestQueue::Runner::RSpec
 
         def queue_up_lazy_group
           group_info = BackgroundLoaderProxy.shift or return
-          file, *groups = group_info
+          file, groups = group_info
           groups.each do |group|
             group_loaded.call group
           end
           key = [file, groups.first.name]
-          queue << key
+          queue << [:group, key]
         end
 
         def queue
@@ -196,6 +197,7 @@ class TestQueue::Runner::RSpec
     class BackgroundLoaderProxy
       class << self
         attr_accessor :count
+        attr_accessor :stats
 
         def shift
           return if empty?
@@ -205,8 +207,13 @@ class TestQueue::Runner::RSpec
             close
             return nil
           end
-          self.count, payload = deserialize(data)
-          payload
+          self.count, file, groups = deserialize(data)
+          (file_group_map[file] ||= Set.new) << groups.first.name
+          [file, groups]
+        end
+
+        def file_group_map
+          stats[:file_group_map] ||= {}
         end
 
         # We've started loading (count) and finished shifting (socket.nil?)
@@ -215,10 +222,18 @@ class TestQueue::Runner::RSpec
         end
 
         def order_files(files)
-          # smallest ones last, as a useful heuristic for execution time...
-          # that way we increase the likelihood of all workers finishing at
-          # the same time
-          files.sort_by { |file| -File.size(file) }
+          files.sort_by do |file|
+            base_cost = (file_group_map[file] || [])
+              .map { |group| stats[group] }
+              .compact
+              .max || Float::INFINITY
+            [
+              # slowest top-level group in the file
+              -base_cost,
+              # or if we have no stats, file size as a proxy for time
+              -File.size(file)
+            ]
+          end
         end
 
         def load_files(files)
@@ -227,9 +242,10 @@ class TestQueue::Runner::RSpec
           self.count = files.count
           parent, child = IO.pipe
           # Start loading all files within a child process so we don't block the master
+          #  TODO: fork multiple background loaders, divvy up the files
           fork do
             parent.close
-            BackgroundLoader.load_all files, BufferedWriter.new(child)
+            BackgroundLoader.load_all files, stats, BufferedWriter.new(child)
             exit! 0
           end
           child.close
@@ -259,8 +275,10 @@ class TestQueue::Runner::RSpec
     class BackgroundLoader
       class << self
         attr_accessor :count
+        attr_accessor :stats
 
-        def load_all(files, socket)
+        def load_all(files, stats, socket)
+          self.stats = stats
           self.socket = socket
           self.count = files.size
           files.each do |file|
@@ -285,14 +303,12 @@ class TestQueue::Runner::RSpec
         end
 
         def queue_up_group(group)
-          payload = [current_file]
           group_info = group.descendants.map { |g|
-            GroupQueue.for(g)
+            GroupQueue.for(g, stats)
           }
           return if group_info.all?(&:empty?)
-          payload.concat(group_info)
 
-          socket.puts serialize([count, payload])
+          socket.puts serialize([count, current_file, group_info])
         end
 
         # As each top-level ExampleGroup is loaded, send all its (and its
