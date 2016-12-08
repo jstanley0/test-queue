@@ -332,16 +332,44 @@ module TestQueue
       @queue.empty?
     end
 
+    def bad_worker_timeout
+      (ENV["TEST_QUEUE_BAD_WORKER_TIMEOUT"] || 120).to_i
+    end
+
     def distribute_queue
       return if relay?
-      @remote_workers = 0
+      @remote_workers = {}
+      last_command = nil
 
       puts "Distributing queue" if ENV['TEST_QUEUE_VERBOSE']
-      until queue_empty? && @remote_workers == 0
+      until queue_empty? && @remote_workers.empty?
         queue_status(@start_time, @queue.size, @workers.size, @remote_workers)
 
         if IO.select([@server], nil, nil, 0.1).nil?
           reap_worker(false) if @workers.any? # check for worker deaths
+          if last_command && Time.now > last_command + bad_worker_timeout
+            puts "No remaining workers have checked in for #{bad_worker_timeout} seconds, aborting."
+            puts "Either you have some broken code, or a bad node :("
+            puts "Check the following outstanding workers for problems:"
+            puts
+            puts "Local workers: #{@workers.size}"
+            sad_workers = @workers.values
+            @workers = {}
+            if @remote_workers.any?
+              puts "Remote workers:"
+              @remote_workers.each do |host, count|
+                puts "  #{host}: #{count}"
+                sad_workers.concat(count.times.map { |i| Worker.new(0, 0) })
+              end
+            end
+            fake_status = Struct.new(:exitstatus).new(1)
+            sad_workers.each do |worker|
+              worker.status = fake_status
+              worker.end_time = Time.now
+            end
+            @completed.concat sad_workers
+            break
+          end
         else
           last_command = Time.now
           sock = @server.accept
@@ -374,7 +402,7 @@ module TestQueue
         if run_token == @run_token
           # If we have a slave from a different test run, don't respond, and it will consider the test run done.
           sock.write("OK\n")
-          @remote_workers += num
+          @remote_workers[slave] = num
         else
           STDERR.puts "*** Worker from run #{run_token} connected to master for run #{@run_token}; ignoring."
           sock.write("WRONG RUN\n")
@@ -386,7 +414,8 @@ module TestQueue
         data = sock.read($1.to_i)
         worker = Marshal.load(data)
         worker_completed(worker)
-        @remote_workers -= 1
+        @remote_workers[worker.host] -= 1
+        @remote_workers.delete(worker.host) if @remote_workers[worker.host] == 0
       end
     end
 
