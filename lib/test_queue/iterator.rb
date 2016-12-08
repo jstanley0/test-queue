@@ -17,8 +17,8 @@ module TestQueue
     end
 
     def query(payload)
+      return if @done
       client = connect_to_master(payload)
-      return if client.nil?
       _r, _w, e = IO.select([client], nil, [client], nil)
       return if !e.empty?
 
@@ -28,7 +28,8 @@ module TestQueue
         return if item.nil? || item.empty?
         item
       end
-    rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ETIMEDOUT
+    rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ETIMEDOUT, Errno::EPIPE
+      @done = true
       puts "rescued #{$!} for #{payload.lines.first}"
     end
 
@@ -64,14 +65,12 @@ module TestQueue
     def connect_to_master(cmd)
       sock =
         if @tcp_address
-          TCPSocket.new(@tcp_address, @tcp_port)
+          Socket.tcp(@tcp_address, @tcp_port, connect_timeout: 30)
         else
           UNIXSocket.new(@sock)
         end
       sock.write(cmd)
       sock
-    rescue Errno::EPIPE
-      nil
     end
 
     include Enumerable

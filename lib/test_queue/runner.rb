@@ -400,9 +400,9 @@ module TestQueue
       puts "Attempting to connect for #{@slave_connection_timeout}s..."
       while sock.nil?
         begin
-          sock = TCPSocket.new(*@relay.split(':'))
-        rescue Errno::ECONNREFUSED => e
-          raise e if Time.now - start > @slave_connection_timeout
+          sock = Socket.tcp(*@relay.split(':'), connect_timeout: 30)
+        rescue Errno::ECONNREFUSED, Errno::ETIMEDOUT
+          raise if Time.now - start > @slave_connection_timeout
           puts "Master not yet available, sleeping..."
           sleep 0.5
         end
