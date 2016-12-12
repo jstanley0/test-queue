@@ -3,6 +3,8 @@ module TestQueue
     attr_reader :stats, :sock
 
     def initialize(sock, suites, filter=nil, runner: nil)
+      @start = Time.now
+      @waiting_time = 0
       @done = false
       @stats = {}
       @procline = $0
@@ -17,6 +19,7 @@ module TestQueue
     end
 
     def query(payload)
+      query_start = Time.now
       return if @done
       client = connect_to_master(payload)
       _r, _w, e = IO.select([client], nil, [client], nil)
@@ -31,6 +34,8 @@ module TestQueue
     rescue Errno::ENOENT, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ETIMEDOUT, Errno::EPIPE
       @done = true
       puts "rescued #{$!} for #{payload.lines.first}"
+    ensure
+      @waiting_time += Time.now - query_start
     end
 
     def each
@@ -50,6 +55,8 @@ module TestQueue
       end
     ensure
       @done = caller.first
+      puts "total time: #{Time.now - @start}"
+      puts "waiting time: #{@waiting_time} seconds"
       File.open("/tmp/test_queue_worker_#{$$}_stats", "wb") do |f|
         f.write Marshal.dump(@stats)
       end
