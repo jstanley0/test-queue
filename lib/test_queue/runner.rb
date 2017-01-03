@@ -179,6 +179,7 @@ module TestQueue
       spawn_workers
       distribute_queue
     ensure
+      puts "got #{$!} while running execute_parallel" if $!
       stop_master
 
       kill_workers
@@ -379,6 +380,7 @@ module TestQueue
         end
       end
     ensure
+      puts "got #{$!} while running distribute_queue" if $!
       stop_master
 
       until @workers.empty?
@@ -447,6 +449,7 @@ module TestQueue
       sock.puts("WORKER #{data.bytesize}")
       sock.write(data)
     ensure
+      puts "got #{$!} while relaying" if $!
       sock.close if sock
     end
 

@@ -145,7 +145,7 @@ class TestQueue::Runner::RSpec
             file, key = keys.shift.pop
             group = group_lookup[key] || begin
               load file
-              group_lookup[key]
+              group_lookup[key] or raise("exepected #{file.inspect} to define #{key.inspect}, it did not")
             end
             group.reserve_items(keys)
             group
@@ -155,7 +155,7 @@ class TestQueue::Runner::RSpec
             file, key = full_key
             group_lookup[key] || begin
               load file
-              group_lookup[key]
+              group_lookup[key] or raise("exepected #{file.inspect} to define #{key.inspect}, it did not")
             end
           end
         end
