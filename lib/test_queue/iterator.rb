@@ -35,7 +35,7 @@ module TestQueue
       @done = true
       puts "rescued #{$!} for #{payload.lines.first}"
     ensure
-      puts "got #{$!} while querying" if $!
+      puts "got #{$!} while querying\n" + $!.backtrace[0..5].join("\n") if $!
       @waiting_time += Time.now - query_start
     end
 
@@ -55,7 +55,7 @@ module TestQueue
         end
       end
     ensure
-      puts "got #{$!} while iterating" if $!
+      puts "got #{$!} while iterating\n" + $!.backtrace[0..5].join("\n") if $!
       @done = caller.first
       puts "total time: #{Time.now - @start}"
       puts "waiting time: #{@waiting_time} seconds"

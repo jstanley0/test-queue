@@ -101,7 +101,7 @@ module TestQueue
       $stdout.sync = $stderr.sync = true
       @start_time = Time.now
 
-      @concurrency > 0 ?
+      @concurrency >= 0 ?
         execute_parallel :
         execute_sequential
 
@@ -129,9 +129,9 @@ module TestQueue
           worker.stats.size,
           worker.end_time - worker.start_time,
           worker.pid,
-          worker.status.exitstatus,
+          worker.status.exitstatus || 1,
           worker.host && " on #{worker.host.split('.').first}"
-        ]
+        ] rescue puts("error outputting worker: #{worker.inspect}")
       end
 
       unless @failures.empty?
@@ -146,7 +146,7 @@ module TestQueue
       save_stats
       summarize
 
-      estatus = @completed.inject(0){ |s, worker| s + worker.status.exitstatus }
+      estatus = @completed.inject(0){ |s, worker| s + (worker.status.exitstatus || 1) }
       estatus = 255 if estatus > 255
       estatus
     end
@@ -179,7 +179,7 @@ module TestQueue
       spawn_workers
       distribute_queue
     ensure
-      puts "got #{$!} while running execute_parallel" if $!
+      puts "got #{$!} while running execute_parallel\n" + $!.backtrace[0..5].join("\n") if $!
       stop_master
 
       kill_workers
@@ -380,7 +380,7 @@ module TestQueue
         end
       end
     ensure
-      puts "got #{$!} while running distribute_queue" if $!
+      puts "got #{$!} while running distribute_queue\n" + $!.backtrace[0..5].join("\n") if $!
       stop_master
 
       until @workers.empty?
@@ -418,6 +418,9 @@ module TestQueue
         worker_completed(worker)
         @remote_workers[worker.host] -= 1
         @remote_workers.delete(worker.host) if @remote_workers[worker.host] == 0
+        sock.write("OK\n")
+      else
+        STDERR.puts("Ignoring unrecognized command: \"#{cmd}\"")
       end
     end
 
@@ -445,11 +448,18 @@ module TestQueue
       worker.host = Socket.gethostname
       data = Marshal.dump(worker)
 
+      puts "WORKER #{worker.num} (pid: #{worker.pid}, #{Time.now})"
       sock = connect_to_relay
       sock.puts("WORKER #{data.bytesize}")
       sock.write(data)
+      response = sock.gets.strip
+      unless response == "OK"
+        STDERR.puts "*** Got non-OK response from master: #{response}"
+      else
+        puts "OK"
+      end
     ensure
-      puts "got #{$!} while relaying" if $!
+      puts "got #{$!} while relaying\n" + $!.backtrace[0..5].join("\n") if $!
       sock.close if sock
     end
 
