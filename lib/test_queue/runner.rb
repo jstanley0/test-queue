@@ -237,7 +237,7 @@ module TestQueue
         pid = fork do
           @server.close if @server
 
-          iterator = iterator_factory(relay?? @relay : @socket, @suites, method(:around_filter), runner: self)
+          iterator = Iterator.new(relay?? @relay : @socket, @suites, method(:around_filter), runner: self)
           after_fork_internal(num, iterator)
           ret = run_worker(iterator) || 0
           cleanup_worker
@@ -246,10 +246,6 @@ module TestQueue
 
         @workers[pid] = Worker.new(pid, num)
       end
-    end
-
-    def iterator_factory(*args)
-      Iterator.new(*args)
     end
 
     def after_fork_internal(num, iterator)

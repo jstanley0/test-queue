@@ -92,8 +92,9 @@ class TestQueue::Runner::RSpec
           @queue
         end
 
-        while pair = best_item(queue, preferred_tag)
-          type, item = pair
+        while best = best_item(queue, preferred_tag)
+          return best if best.is_a?(::Symbol) # e.g. :wait
+          type, item = best
           # woot, direct child example
           if type == :example
             self.example_queue_size -= 1
@@ -105,7 +106,7 @@ class TestQueue::Runner::RSpec
             # if the group is eligible for splitting, throw it to the back of the queue so
             # another worker can potentially come help
             key = normalize_scope(item)
-            sub_queue = group_queues[key] || raise("don't know what #{key.inspect} is (item is #{item.inspect}, pair is #{pair.inspect})")
+            sub_queue = group_queues[key] || raise("don't know what #{key.inspect} is (item is #{item.inspect}, best is #{best.inspect})")
             can_split = !sub_queue.tags[:no_split]
             has_more = !sub_queue.empty?
             below_split_threshold = split_counts[key] < max_splits_per_group
@@ -165,13 +166,9 @@ class TestQueue::Runner::RSpec
           super
         end
       end
-
-      def iterator_factory(*args)
-        Iterator.new(*args)
-      end
     end
 
-    class Iterator < ::TestQueue::Iterator
+    module Iterator
       def query(payload)
         if payload == "POP\n" && @runner.preferred_tag
           tag = ::Marshal.dump(@runner.preferred_tag)
@@ -313,5 +310,6 @@ class TestQueue::Runner::RSpec
 
   prepend SplitGroups::Runner
   GroupResolver.prepend SplitGroups::GroupResolver
+  ::TestQueue::Iterator.prepend SplitGroups::Iterator
   ::RSpec::Core::ExampleGroup.singleton_class.prepend SplitGroups::Extensions::ExampleGroup
 end

@@ -50,6 +50,17 @@ class TestQueue::Runner::RSpec
       end
     end
 
+    module Iterator
+      def query(payload)
+        while true
+          result = super
+          break unless result == :wait # we might have caught up to the background loader
+          sleep 0.1
+        end
+        result
+      end
+    end
+
     # This replaces @queue
     module Queue
       class << self
@@ -88,7 +99,7 @@ class TestQueue::Runner::RSpec
           return if empty?
           queue_up_lazy_groups
           puts "All groups assigned" if ENV["TEST_QUEUE_VERBOSE"] && queue.size == 1 && BackgroundLoaderProxy.empty?
-          queue.shift || split_queue.shift
+          queue.shift || split_queue.shift || (BackgroundLoaderProxy.empty? ? nil : :wait)
         end
 
         # Not necessarily accurate, since BackgroundLoaderProxy.count is
@@ -104,9 +115,6 @@ class TestQueue::Runner::RSpec
         def queue_up_lazy_groups
           # pull in any already background-loaded ones
           queue_up_lazy_group while BackgroundLoaderProxy.queue_size > 0
-          # we might be faster than the background loader, so block
-          # until we get one (or it's done)
-          queue_up_lazy_group if queue.empty?
         end
 
         def queue_up_lazy_group
@@ -514,6 +522,7 @@ class TestQueue::Runner::RSpec
   end
 
   prepend LazyGroups::Runner
+  ::TestQueue::Iterator.prepend LazyGroups::Iterator
   ::RSpec::Core::Configuration.prepend LazyGroups::Extensions::Configuration
   ::RSpec::Core::World.prepend LazyGroups::Extensions::World
   ::RSpec::ExampleGroups.singleton_class.prepend LazyGroups::Extensions::ExampleGroups
