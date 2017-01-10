@@ -6,18 +6,18 @@ require 'base64'
 class TestQueue::Runner::RSpec
   module LazyGroups
     class << self
-      attr_writer :loader
-
-      def loader
-        @loader ||= BackgroundLoader
-      end
+      attr_accessor :loader
     end
 
     module Runner
       def initialize(*)
-        Queue.group_loaded = method(:add_group_queue)
         BackgroundLoaderProxy.stats = stats
         super no_sort: true
+      end
+
+      def start_master
+        super
+        BackgroundLoaderProxy.load_files @server unless relay?
       end
 
       def after_fork_internal(*)
@@ -34,9 +34,35 @@ class TestQueue::Runner::RSpec
         scope.is_a?(Array) ? scope.last : scope
       end
 
-      unless defined? SplitGroups
+      def file_group_map
+        stats[:file_group_map] ||= {}
+      end
+
+      def queue_up_lazy_group(loader_num, files_remaining, file, groups)
+        BackgroundLoaderProxy.counts[loader_num] = files_remaining
+        (file_group_map[file] ||= Set.new) << groups.first.name
+
+        groups.each do |group|
+          add_group_queue group
+        end
+        key = [file, groups.first.name]
+        @queue.push [:group, key]
+      end
+
+      if defined? SplitGroups
         def handle_command(cmd, sock)
           case cmd
+          when /^NEW SUITE (\d+)/
+            queue_up_lazy_group(*Marshal.load(sock.read($1.to_i)))
+          else
+            super
+          end
+        end
+      else
+        def handle_command(cmd, sock)
+          case cmd
+          when /^NEW SUITE (\d+)/
+            queue_up_lazy_group(*Marshal.load(sock.read($1.to_i)))
           when /^POP/
             # like the original, but no `.to_s`
             if obj = @queue.shift
@@ -66,39 +92,15 @@ class TestQueue::Runner::RSpec
       class << self
         extend Forwardable
 
+        def_delegator :queue, :push
         def_delegator :split_queue, :<<
 
-        attr_accessor :group_loaded
-
-        # While it is as lazy as possible, you can request that it load
-        # a certain number up front. This is useful in conjunction with
-        # preferred tags and a custom order_files method. That way you
-        # can ensure certain files are preloaded before anything starts.
-        attr_accessor :preload_count
-        def preload!
-          @preloaded = true
-          (preload_count || 0).times { queue_up_lazy_group }
-        end
-
-        def index
-          preload! unless @preloaded
-          queue.index &Proc.new
-        end
-
-        def delete_at(index)
-          queue_up_lazy_groups
-          queue.delete_at(index)
-        end
-
         def empty?
-          queue.empty? && BackgroundLoaderProxy.empty? && split_queue.empty?
+          size == 0
         end
 
         def shift
-          preload! unless @preloaded
           return if empty?
-          queue_up_lazy_groups
-          puts "All groups assigned" if ENV["TEST_QUEUE_VERBOSE"] && queue.size == 1 && BackgroundLoaderProxy.empty?
           queue.shift || split_queue.shift || (BackgroundLoaderProxy.empty? ? nil : :wait)
         end
 
@@ -111,21 +113,6 @@ class TestQueue::Runner::RSpec
         end
 
        private
-
-        def queue_up_lazy_groups
-          # pull in any already background-loaded ones
-          queue_up_lazy_group while BackgroundLoaderProxy.queue_size > 0
-        end
-
-        def queue_up_lazy_group
-          group_info = BackgroundLoaderProxy.shift or return
-          file, groups = group_info
-          groups.each do |group|
-            group_loaded.call group
-          end
-          key = [file, groups.first.name]
-          queue << [:group, key]
-        end
 
         def queue
           @queue ||= []
@@ -190,46 +177,33 @@ class TestQueue::Runner::RSpec
     # we don't actually load up anything synchronously, but instead do it
     # in a background process and then lazily populate the queue via IPC
     #
-    # Basically:
-    #
-    # 1. The parent process tells the child process which files to load
-    # 2. The child process loads each file and writes a bunch of metadata
-    #    back to the parent
-    # 3. The parent pulls any outstanding data its queue right before it
-    #    shifts the next item
-    #
-    # So the lower bound on how quickly test-queue can finish is how long it
-    # takes to load up your whole app and test-suite (step 3 can block on 2
-    # if tests are completing in parallel faster than files are loading in
-    # the background)
+    # If workers are pulling stuff off the queue faster than the background
+    # loaders can run, the master will tell them to wait.
     class BackgroundLoaderProxy
+      NUM_LOADERS = 2
+
       class << self
-        attr_accessor :count
+        attr_accessor :counts
         attr_accessor :stats
 
-        def shift
-          return if empty?
-          data = socket.gets or raise("unexpected EOF from background loader")
-          if data == "EOF\n" # send an actual "EOF\n" string to signal we are done
-            self.count = 0
-            close
-            return nil
-          end
-          self.count, file, groups = deserialize(data)
-          (file_group_map[file] ||= Set.new) << groups.first.name
-          [file, groups]
+        def empty?
+          count == 0
+        end
+
+        def count
+          counts ? counts.inject(&:+) : 1
         end
 
         def file_group_map
           stats[:file_group_map] ||= {}
         end
 
-        # We've started loading (count) and finished shifting (socket.nil?)
-        def empty?
-          count && socket.nil?
+        def spec_files
+          @spec_files ||= []
         end
 
         def order_files(files)
+          file_group_map = stats[:file_group_map] || {}
           files.sort_by do |file|
             base_cost = (file_group_map[file] || [])
               .map { |group| stats[group] }
@@ -244,217 +218,93 @@ class TestQueue::Runner::RSpec
           end
         end
 
-        def load_files(files)
-          files = order_files(files)
-
-          self.count = files.count
-          parent, child = IO.pipe
-          # Start loading all files within a child process so we don't block the master
-          #  TODO: fork multiple background loaders, divvy up the files
-          fork do
-            parent.close
-            BackgroundLoader.load_all files, stats, BufferedWriter.new(child)
-            exit! 0
+        def load_files(server)
+          files = order_files(spec_files)
+          chunks = NUM_LOADERS.times.map { [] }
+          files.each_with_index do |file, i|
+            chunks[i % NUM_LOADERS] << file
           end
-          child.close
-          self.socket = EagerReader.new(parent)
-        end
 
-        # how many items can we read before blocking?
-        def queue_size
-          socket && socket.queue_size || 0
-        end
+          self.counts = chunks.map(&:size)
 
-       private
-
-        attr_accessor :socket
-
-        def close
-          socket.close
-          self.socket = nil
-        end
-
-        def deserialize(str)
-          ::Marshal.load(::Base64.decode64(str))
+          chunks.each_with_index do |list, num|
+            fork do
+              BackgroundLoader.new num, list, stats, server
+              exit! 0
+            end
+          end
         end
       end
     end
 
     class BackgroundLoader
-      class << self
-        attr_accessor :count
-        attr_accessor :stats
+      attr_accessor :num
+      attr_accessor :count
+      attr_accessor :stats
+      attr_accessor :server
 
-        def load_all(files, stats, socket)
-          self.stats = stats
-          self.socket = socket
-          self.count = files.size
-          files.each do |file|
-            load_file file
-          end
-          socket.puts "EOF"
-          socket.close
-          puts "All files loaded" if ENV["TEST_QUEUE_VERBOSE"]
+      def initialize(num, files, stats, server)
+        LazyGroups.loader = self
+
+        self.num = num
+        self.stats = stats
+        self.server = server
+        self.count = files.size
+        files.each do |file|
+          load_file file
         end
 
-        def load_file(file)
-          self.loaded_groups = []
-          self.current_file = file
-          self.count -= 1
-          load file
+        puts "All files loaded (#{num + 1}/#{BackgroundLoaderProxy::NUM_LOADERS})" if ENV["TEST_QUEUE_VERBOSE"]
+      end
 
-          ::RSpec.world.add_descending_declaration_line_numbers_by_file loaded_groups
+      def load_file(file)
+        self.loaded_groups = []
+        self.current_file = file
+        self.count -= 1
+        load file
 
-          loaded_groups.each do |group|
-            queue_up_group group
-          end
-        end
+        ::RSpec.world.add_descending_declaration_line_numbers_by_file loaded_groups
 
-        def queue_up_group(group)
-          group_info = group.descendants.map { |g|
-            GroupQueue.for(g, stats)
-          }
-          return if group_info.all?(&:empty?)
-
-          socket.puts serialize([count, current_file, group_info])
-        end
-
-        # As each top-level ExampleGroup is loaded, send all its (and its
-        # descendants') info back to the master process so that it can
-        # populate queues 'n such
-        def loaded(group)
-          loaded_groups << group
-        end
-
-       private
-
-        attr_accessor :loaded_groups, :current_file, :socket
-
-        def serialize(obj)
-          ::Base64.encode64(::Marshal.dump(obj)).gsub(/\n/, '')
+        loaded_groups.each do |group|
+          queue_up_group group
         end
       end
-    end
 
-    # like the built-in Queue, but much less passive about running the
-    # writer thread
-    class HungryQueue
-      extend Forwardable
-      def_delegators :@queue, :empty?, :size
+      def queue_up_group(group)
+        group_info = group.descendants.map { |g|
+          GroupQueue.for(g, stats)
+        }
+        return if group_info.all?(&:empty?)
 
-      def initialize
-        @queue = []
-        @mutex = Mutex.new
+        payload = Marshal.dump([num, count, current_file, group_info])
+        server.connect_address.connect do |sock|
+          sock.puts "NEW SUITE #{payload.size}"
+          sock.write payload
+        end
       end
 
-      def <<(item)
-        @mutex.synchronize { @queue << item }
-      end
-
-      def shift
-        Thread.pass while empty? && !closed?
-        @mutex.synchronize { @queue.shift }
-      end
-
-      def close
-        @closed = true
-      end
-
-      def closed?
-        @closed
-      end
-    end
-
-    # This wraps an IO object and proxies writes through a queue, sending
-    # them to the real IO in a separate thread. This way we can keep
-    # writing to it indefinitely, even if it's not being read on the other
-    # end and the real buffer fills up; we want the background loader to
-    # load files as fast as it can, even if the master isn't ready to start
-    # de-queuing things
-    class BufferedWriter
-      def initialize(socket)
-        @socket = socket
-        @queue = HungryQueue.new
-        start_writing
-      end
-
-      def puts(s)
-        @queue << s
-      end
-
-      def close
-        @queue.close
-        @writer.join
+      # As each top-level ExampleGroup is loaded, send all its (and its
+      # descendants') info back to the master process so that it can
+      # populate queues 'n such
+      def loaded(group)
+        loaded_groups << group
       end
 
      private
 
-      def start_writing
-        @writer = ::Thread.new do
-          while item = @queue.shift
-            @socket.puts item
-          end
-          @socket.close
-        end
-      end
-    end
+      attr_accessor :loaded_groups, :current_file, :socket
 
-    # This wraps an IO object and eagerly reads into a ruby buffer. This
-    # makes sure the real buffer is drained so that writes can keep
-    # happening on the other end; we want the background loader to load
-    # files as fast as it can, even if the master isn't ready to start
-    # de-queuing things
-    class EagerReader
-      def initialize(socket)
-        @socket = socket
-        @queue = HungryQueue.new
-        eagerly_read
-      end
-
-      def gets
-        @queue.shift
-      end
-
-      def close
-        @reader.join
-      end
-
-      def queue_size
-        @queue.size
-      end
-
-     private
-
-      def eagerly_read
-        @reader = ::Thread.new do
-          while line = @socket.gets
-            @queue << line
-          end
-          @queue.close
-          @socket.close
-        end
+      def serialize(obj)
+        ::Base64.encode64(::Marshal.dump(obj)).gsub(/\n/, '')
       end
     end
 
     module Extensions
       module Configuration
-        if ENV["TEST_QUEUE_RELAY"]
-          # Make up-front loading a no-op on workers, so that they can start up
-          # right away (we'll load on demand when we pop)
-          def load(file)
-            BackgroundLoaderProxy.count ||= 0
-            BackgroundLoaderProxy.count += 1
-          end
-        else
-          # Defer up-front loading on the master so we can assign out the queue
-          # while we're still loading files
-          def load(file)
-          end
-
-          def load_spec_files
-            super
-            BackgroundLoaderProxy.load_files loaded_spec_files
-          end
+        # Defer up-front loading on the master so we can assign out the queue
+        # while we're still loading files
+        def load(file)
+          BackgroundLoaderProxy.spec_files << file
         end
       end
 
