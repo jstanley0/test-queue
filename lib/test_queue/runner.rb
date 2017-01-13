@@ -146,8 +146,9 @@ module TestQueue
       save_stats
       summarize
 
-      estatus = @completed.inject(0){ |s, worker| s + (worker.status.exitstatus || 1) }
-      estatus = 255 if estatus > 255
+      estatus = 0
+      estatus = 1 if @completed.any? { |worker| worker.status.exitstatus != 0 }
+      estatus = 1 if @timed_out
       estatus
     end
 
@@ -333,6 +334,42 @@ module TestQueue
       (ENV["TEST_QUEUE_BAD_WORKER_TIMEOUT"] || 120).to_i
     end
 
+    def queue_size
+      @queue.size
+    end
+
+    def record_bad_workers
+      sad_workers = @workers.values
+      @remote_workers.each do |host, count|
+        sad_workers.concat(count.times.map { |i| Worker.new(0, 0) })
+      end
+
+      if sad_workers.present?
+        puts "No remaining workers have checked in for #{bad_worker_timeout} seconds, aborting."
+      else
+        puts "All workers have completed, but there are still items in the queue, aborting."
+      end
+      puts "Either you have some broken code, or a bad node :("
+      puts
+      puts "Queue size: #{queue_size}"
+      puts "Local workers: #{@workers.size}" if @workers.any?
+      if @remote_workers.any?
+        puts "Remote workers:"
+        @remote_workers.each do |host, count|
+          puts "  #{host}: #{count}"
+        end
+      end
+
+      @timed_out = true
+      @workers = {}
+      fake_status = Struct.new(:exitstatus).new(1)
+      sad_workers.each do |worker|
+        worker.status = fake_status
+        worker.end_time = Time.now
+      end
+      @completed.concat sad_workers
+    end
+
     def distribute_queue
       return if relay?
       @remote_workers = {}
@@ -345,26 +382,7 @@ module TestQueue
         if IO.select([@server], nil, nil, 0.1).nil?
           reap_worker(false) if @workers.any? # check for worker deaths
           if last_command && Time.now > last_command + bad_worker_timeout
-            puts "No remaining workers have checked in for #{bad_worker_timeout} seconds, aborting."
-            puts "Either you have some broken code, or a bad node :("
-            puts "Check the following outstanding workers for problems:"
-            puts
-            puts "Local workers: #{@workers.size}"
-            sad_workers = @workers.values
-            @workers = {}
-            if @remote_workers.any?
-              puts "Remote workers:"
-              @remote_workers.each do |host, count|
-                puts "  #{host}: #{count}"
-                sad_workers.concat(count.times.map { |i| Worker.new(0, 0) })
-              end
-            end
-            fake_status = Struct.new(:exitstatus).new(1)
-            sad_workers.each do |worker|
-              worker.status = fake_status
-              worker.end_time = Time.now
-            end
-            @completed.concat sad_workers
+            record_bad_workers
             break
           end
         else

@@ -37,6 +37,7 @@ class TestQueue::Runner::RSpec
       def example_queue_size
         @example_queue_size ||= 0
       end
+      alias_method :queue_size, :example_queue_size
 
       def add_group_queue(queue)
         self.example_queue_size += queue.num_examples
