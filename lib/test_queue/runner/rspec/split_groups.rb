@@ -141,10 +141,11 @@ class TestQueue::Runner::RSpec
       end
 
       def capture_timing(item)
+        stat_key = GroupQueue.stat_key_for(item)
         # for examples or no_split groups, we capture the total time, since
         # it will take at least that long
-        return super(item.full_description) if item.is_a?(::RSpec::Core::Example)
-        return super if item.metadata[:no_split]
+        return super(stat_key) if item.is_a?(::RSpec::Core::Example)
+        return super(stat_key) if item.metadata[:no_split]
 
         # otherwise we just capture the time of our context hooks plus the
         # time of the slowest child in the group (a subgroup or example)
@@ -155,7 +156,7 @@ class TestQueue::Runner::RSpec
           flatten.
           map { |key| @stats[key] || 0 }.
           max || 0
-        @stats[item.to_s] = item.hook_time + slowest_child_time
+        @stats[stat_key] = item.hook_time + slowest_child_time
         result
       end
     end

@@ -29,6 +29,19 @@ class TestQueue::Runner::RSpec
           items,
           Hash[TRACKED_METADATA.map { |key| [key, group.metadata[key]] }]
     end
+
+    # uniquely identify this group or example
+    def self.stat_key_for(thing)
+      if thing.is_a?(::RSpec::Core::Example)
+        if thing.metadata[:description].to_s.empty?
+          thing.id
+        else
+          thing.full_description
+        end
+      else
+        thing.to_s
+      end
+    end
   end
 
   class GroupResolver
@@ -54,12 +67,12 @@ class TestQueue::Runner::RSpec
         @filtered_items_hash ||= {
           example: ::Hash[
             ::RSpec.world.filtered_examples[self].map { |example|
-              [example.full_description, example]
+              [GroupQueue.stat_key_for(example), example]
             }
           ],
           group: ::Hash[
             children.select { |group| group.filtered_items_hash.any? }
-                    .map { |group| [group.to_s, group] }
+                    .map { |group| [GroupQueue.stat_key_for(group), group] }
           ]
         }
       end
