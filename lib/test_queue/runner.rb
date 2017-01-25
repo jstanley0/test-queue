@@ -92,6 +92,10 @@ module TestQueue
         end
     end
 
+    def new_stats
+      @new_stats ||= {}
+    end
+
     # Run the tests.
     #
     # If exit_when_done is true, exit! will be called before this method
@@ -153,9 +157,11 @@ module TestQueue
     end
 
     def save_stats
-      if @stats
+      result = new_stats
+      if result.present?
+        result = stats.merge(result) unless ENV["TEST_QUEUE_REPLACE_STATS"]
         File.open(stats_file, 'wb') do |f|
-          f.write Marshal.dump(stats)
+          f.write Marshal.dump(result)
         end
       end
     end

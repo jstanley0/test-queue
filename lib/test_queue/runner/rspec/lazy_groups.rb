@@ -35,7 +35,7 @@ class TestQueue::Runner::RSpec
       end
 
       def file_group_map
-        stats[:file_group_map] ||= {}
+        (ENV["TEST_QUEUE_REPLACE_STATS"] ? new_stats : stats)[:file_group_map] ||= {}
       end
 
       def queue_up_lazy_group(loader_num, files_remaining, file, groups)

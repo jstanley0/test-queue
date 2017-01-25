@@ -36,7 +36,7 @@ module TestQueue
           # take the cost of the slowest one across all runners;
           # when splitting a group, the cost is the time of the slowest
           # sub-group or example, not the group as a whole
-          stats[s] = [val, stats[s]].compact.max
+          new_stats[s] = [val, new_stats[s]].compact.max
         end
 
         worker.summary  = worker.lines.grep(/ examples?, /).first
