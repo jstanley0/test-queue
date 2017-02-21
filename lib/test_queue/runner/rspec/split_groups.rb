@@ -162,13 +162,15 @@ class TestQueue::Runner::RSpec
     end
 
     class QueueStrategy
+      attr_reader :enumerator
+
       def initialize(group)
         @group = group
         @enumerator = Enumerator.new(group)
       end
 
       def order(items)
-        @enumerator
+        enumerator
       end
 
       class Enumerator
@@ -177,7 +179,6 @@ class TestQueue::Runner::RSpec
         end
 
         attr_reader :group
-        attr_reader :example_block
 
         def initialize(group)
           @group = group
@@ -198,11 +199,17 @@ class TestQueue::Runner::RSpec
           else
             @group_block = block
           end
-
           result = []
+          each do |item|
+            result << run_item(item)
+          end
+          result
+        end
+
+        def each
           if item = group.reserved_item
             group.reserved_item = nil
-            result << run_item(item)
+            yield item
           end
 
           while keys = iterator.pop(group.to_s)
@@ -214,9 +221,8 @@ class TestQueue::Runner::RSpec
             # if a group, we need to reserve the specified descendant example
             # and any intermediate groups
             item.reserve_items(keys) if subtype == :group
-            result << run_item(item)
+            yield item
           end
-          result
         end
 
         def run_item(item)
@@ -255,13 +261,31 @@ class TestQueue::Runner::RSpec
           capture_hook_time { super }
         end
 
-        attr_reader :hook_time
+        # when a whole group fails or is skipped, ensure we consume its
+        # items from the queue so another runner doesn't try to
+        def for_filtered_examples(reporter, &block)
+          ordering_strategy.enumerator.each do |child|
+            if child.is_a?(::RSpec::Core::Example)
+              yield child
+            else
+              reporter.example_group_started(child)
+              child.for_filtered_examples(reporter, &block)
+              reporter.example_group_finished(child)
+            end
+          end
+          false
+        end
+
+        attr_writer :hook_time
+        def hook_time
+          @hook_time ||= 0
+        end
+
         def capture_hook_time
           start = Time.now
-          result = yield
-          @hook_time ||= 0
-          @hook_time += Time.now - start
-          result
+          yield
+        ensure
+          self.hook_time += Time.now - start
         end
       end
     end
