@@ -180,7 +180,7 @@ class TestQueue::Runner::RSpec
     # If workers are pulling stuff off the queue faster than the background
     # loaders can run, the master will tell them to wait.
     class BackgroundLoaderProxy
-      NUM_LOADERS = 2
+      NUM_LOADERS = ENV.fetch("TEST_QUEUE_NUM_LAZY_LOADERS", 2).to_i
 
       class << self
         attr_accessor :counts
