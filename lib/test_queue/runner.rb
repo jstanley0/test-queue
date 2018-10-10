@@ -413,7 +413,7 @@ module TestQueue
       worker = "#{addr[2]}:#{addr[1]}" # IP:port
       #@assignments ||= {}
       #@assignments[worker] = obj
-      puts "*** assigned #{obj} to #{worker}"
+      STDERR.puts "*** assigned #{obj} to #{worker}"
     end
 
     def handle_command(cmd, sock)
