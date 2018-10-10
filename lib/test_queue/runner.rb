@@ -408,6 +408,14 @@ module TestQueue
       end
     end
 
+    def log_last_assignment(obj, sock)
+      addr = sock.peeraddr(false)
+      worker = "#{addr[2]}:#{addr[1]}" # IP:port
+      #@assignments ||= {}
+      #@assignments[worker] = obj
+      puts "*** assigned #{obj} to #{worker}"
+    end
+
     def handle_command(cmd, sock)
       case cmd
       when /^POP/
@@ -415,6 +423,7 @@ module TestQueue
         if obj = @queue.shift
           data = Marshal.dump(obj.to_s)
           sock.write(data)
+          log_last_assignment(obj, sock)
         end
       when /^SLAVE (\d+) ([\w\.-]+) (\w+)(?: (.+))?/
         num = $1.to_i
